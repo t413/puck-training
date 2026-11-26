@@ -6,7 +6,7 @@ import genesis_forge.mdp as gf_mdp
 
 CONTROL_DT = 1 / 50
 INITIAL_BODY_POSITION = (0.0, 0.0, 0.231) #initial robot height in standing pose
-HEIGHT_RANGE = (0.08, 0.34)
+HEIGHT_RANGE = (0.02, 0.32) # (m)
 STANDING_JOINT_POSITIONS = {
     "flexor_r": 0.0,
     "hip_r": math.pi / 4,
@@ -52,6 +52,7 @@ class PuckEnv(ManagedEnvironment):
             horizontal_scale=0.1,
             grid=[
                 [ terrain.Flat(), terrain.Wave(num_waves=10, border_width=1.0, amplitude=0.1) ], #flat, wavy
+                [ terrain.Wave(num_waves=100, amplitude=0.02, border_width=1.0), terrain.Wave(num_waves=2, amplitude=0.3, border_width=1.0) ], # rough, big wide gradient waves
             ],
         )
         self.robot = self.scene.add_entity(
