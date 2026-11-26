@@ -1,12 +1,16 @@
-import math, torch
+import math, torch, typing
 import genesis as gs
 from genesis_forge import ManagedEnvironment, terrain
 import genesis_forge.managers as gf_mgrs
 import genesis_forge.mdp as gf_mdp
+from genesis.utils import geom as gs_util_geom
 
 CONTROL_DT = 1 / 50
 INITIAL_BODY_POSITION = (0.0, 0.0, 0.231) #initial robot height in standing pose
 HEIGHT_RANGE = (0.02, 0.32) # (m)
+D2R : typing.Final[float] = math.pi / 180
+PITCH_RANGE = (-30 * D2R, 30 * D2R)
+ROLL_RANGE = (-50 * D2R, 50 * D2R)
 STANDING_JOINT_POSITIONS = {
     "flexor_r": 0.0,
     "hip_r": math.pi / 4,
@@ -141,6 +145,43 @@ class PuckEnv(ManagedEnvironment):
             range=HEIGHT_RANGE,
             resample_time_sec=4.0,
         )
+        self.attitude_command = gf_mgrs.CommandManager(
+            self, range={"pitch": PITCH_RANGE, "roll": ROLL_RANGE},
+            resample_time_sec=3.0,
+        )
+
+        def square_linear_error(error: torch.Tensor, scale: float) -> torch.Tensor:
+            '''exponential reward with additial linear penalty to provide gradient pressure for large errors'''
+            return torch.exp(-(error / scale).square()) - 0.1 * (error.abs() / scale)
+
+        def effective_attitude(name: str) -> torch.Tensor:
+            height = self.height_command.command[:, 0]
+            lo, hi = HEIGHT_RANGE
+            h_n = INITIAL_BODY_POSITION[2]
+            scale = torch.where(
+                height < h_n,
+                (height - lo) / (h_n - lo),
+                (hi - height) / (hi - h_n),
+            ).clamp(0.0, 1.0)
+            return self.attitude_command.get_command(name).reshape(-1) * scale
+
+        def pitch_tracking(env) -> torch.Tensor:
+            actual = gs_util_geom.quat_to_xyz(self.robot_manager.base_quat, rpy=True)[:, 1] #y rotation
+            target = effective_attitude('pitch')
+            return square_linear_error(actual - target, 0.2)
+        def roll_tracking(env) -> torch.Tensor:
+            actual = gs_util_geom.quat_to_xyz(self.robot_manager.base_quat, rpy=True)[:, 0] #x rotation
+            target = effective_attitude('roll')
+            return square_linear_error(actual - target, 0.2)
+
+        def hip_flexor_alignment(env) -> torch.Tensor:
+            joint_positions = self.leg_actuators.get_dofs_position()
+            flexor_indices = [ self.leg_actuators.dofs_names.index(name) for name in ("flexor_r", "flexor_l") ]
+            max_flexor_angle = joint_positions[:, flexor_indices].abs().amax(dim=1)
+            tolerance = math.pi / 15 #12deg
+            excess = torch.relu(max_flexor_angle - tolerance)
+            # return torch.exp(-4.0 * (excess / tolerance).square())
+            return square_linear_error(-4.0 * excess, tolerance)
 
         self.reward_mgr = gf_mgrs.RewardManager(
             self,
@@ -169,13 +210,9 @@ class PuckEnv(ManagedEnvironment):
                         sensitivity=0.005,
                     ),
                 },
-                # Keep the body level
-                "flat_orientation": {
-                    "weight": -2.0,
-                    "fn": gf_mdp.rewards.flat_orientation_l2(
-                        entity_manager=self.robot_manager,
-                    ),
-                },
+                "command_pitch": { "weight": 1.0, "fn": pitch_tracking },
+                "command_roll":  { "weight": 1.0, "fn": roll_tracking },
+                "hip_flexor_alignment": { "weight": 0.5, "fn": hip_flexor_alignment },
                 # Don't bounce up and down. Kept light, so it doesn't slow the
                 # robot down when moving to a new commanded height.
                 "lin_vel_z": {
@@ -265,6 +302,7 @@ class PuckEnv(ManagedEnvironment):
                     "scale": 0.25,
                     "clip": (-100.0, 100.0),
                 },
+                "attitude_cmd": {"fn": lambda env: torch.stack([effective_attitude("pitch"), effective_attitude("roll")], dim=-1)},
                 "projected_gravity": {
                     "fn": lambda env: self.robot_manager.get_projected_gravity(),
                 },
