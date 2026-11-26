@@ -1,10 +1,28 @@
-"""Train the Puck standing policy with Genesis Forge and RSL-RL."""
+import argparse
+import copy
+import os
+import pickle
+import shutil
 
-import torch, argparse, copy, pathlib, datetime, time
+import genesis as gs
+import torch
+from env import PuckEnv
+from rsl_rl.runners import OnPolicyRunner
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+from genesis_forge.wrappers import (
+    RslRlWrapper,
+    VideoWrapper,
+)
 
-def training_config(seed: int = 0) -> dict:
+parser = argparse.ArgumentParser(add_help=True)
+parser.add_argument("-n", "--num_envs", type=int, default=4096)
+parser.add_argument("-i", "--max_iterations", type=int, default=600)
+parser.add_argument("-d", "--device", type=str, default="gpu")
+parser.add_argument("-e", "--exp_name", type=str, default="puck")
+args = parser.parse_args()
+
+
+def training_cfg():
     return {
         "algorithm": {
             "class_name": "PPO",
@@ -13,121 +31,92 @@ def training_config(seed: int = 0) -> dict:
             "entropy_coef": 0.01,
             "gamma": 0.99,
             "lam": 0.95,
-            "learning_rate": 0.001,
+            "learning_rate": 1.0e-3,
             "max_grad_norm": 1.0,
             "num_learning_epochs": 5,
             "num_mini_batches": 4,
             "schedule": "adaptive",
             "use_clipped_value_loss": True,
             "value_loss_coef": 1.0,
+            "rnd_cfg": None,
+            "symmetry_cfg": {
+                "data_augmentation_func": "symmetry:mirror_obs_actions",
+                "use_data_augmentation": True,
+                "use_mirror_loss": False,
+                "mirror_loss_coeff": 0.0,
+            },
         },
         "actor": {
             "class_name": "MLPModel",
-            "hidden_dims": [512, 256, 128],
+            "hidden_dims": [256, 128, 64],
             "activation": "elu",
             "obs_normalization": True,
             "distribution_cfg": {
                 "class_name": "GaussianDistribution",
-                "init_std": 0.3,
+                "init_std": 1.0,
             },
         },
         "critic": {
             "class_name": "MLPModel",
-            "hidden_dims": [512, 256, 128],
+            "hidden_dims": [256, 128, 64],
             "activation": "elu",
             "obs_normalization": True,
         },
-        "seed": seed,
+        "seed": 1,
         "num_steps_per_env": 24,
         "save_interval": 100,
-        "obs_groups": {"actor": ["policy"], "critic": ["policy"]},
+        "obs_groups": {"actor": ["policy"], "critic": ["policy", "privileged"]},
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--num-envs", type=int, default=2048)
-    parser.add_argument("--iterations", type=int, default=10000)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
-    parser.add_argument("--resume", type=pathlib.Path, help="Resume from an existing model")
-    parser.add_argument("--curriculum", default=0, type=float, help="Curriculum level to start training")
-    parser.add_argument("log_dir", type=pathlib.Path, nargs="?", default=None)
-    parser.add_argument("--video-every", type=int, default=25, help="Record a video every N iterations")
-    parser.add_argument("--video-len", type=float, default=10.0, help="Video length in seconds")
-
-    args = parser.parse_args()
-    if args.num_envs <= 0 or args.iterations <= 0:
-        parser.error("--num-envs and --iterations must be positive")
-    if args.resume is not None and not args.resume.is_file():
-        parser.error(f"Checkpoint does not exist: {args.resume}")
-    print(f"Setting up training with {args.num_envs} environments and {args.iterations} iterations on device {args.device}")
-
-    if args.log_dir is None:
-        base = PROJECT_ROOT / "runs" / datetime.datetime.now().strftime("%Y%m%d")
-        args.log_dir = base
-        for n in range(1, 1000):
-            if not (args.log_dir.exists() and any(args.log_dir.iterdir())):
-                break
-            args.log_dir = base.with_name(f"{base.name}-{n}")
-    assert isinstance(args.log_dir, pathlib.Path)
-    print(f"Logging to {args.log_dir}")
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-
-    print("importing genesis...", end=" ", flush=True)
-    start = time.perf_counter()
-    import genesis as gs
-    print(f"Importing genesis took {time.perf_counter() - start:.2f} seconds")
-    from genesis_forge.wrappers import RslRlWrapper, VideoWrapper
-    from puck.env import PuckStandEnv
-
+def main():
+    # Initialize Genesis
+    # Processor backend (GPU or CPU)
+    backend = gs.gpu
     if args.device == "cpu":
-        torch.set_default_device("cpu")
         backend = gs.cpu
-    else: backend = gs.gpu
+        torch.set_default_device("cpu")
+    gs.init(logging_level="warning", backend=backend, performance_mode=True)
 
-    gs.init(backend=backend, seed=args.seed, logging_level="warning")
+    # Logging directory
+    log_base_dir = "./logs"
+    experiment_name = args.exp_name
+    log_path = os.path.join(log_base_dir, experiment_name)
+    if os.path.exists(log_path):
+        shutil.rmtree(log_path)
+    os.makedirs(log_path, exist_ok=True)
+    print(f"Logging to: {log_path}")
 
-    puckenv = PuckStandEnv(num_envs=args.num_envs, headless=True)
-    puckenv.periodic_outfile = args.log_dir / "log.txt"
-    puckenv.log(f"Training with {args.num_envs} environments and {args.iterations} iterations on device {args.device}")
-    puckenv.curriculum_level = args.curriculum
-    if puckenv.curriculum_level > 0:
-        puckenv.log(f"Starting training at curriculum level {args.curriculum}")
-    video_env = VideoWrapper(
-        puckenv,
-        camera_attr="camera",
-        video_length_sec=args.video_len,
-        iteration_trigger=lambda iter: (
-            iter > 0 and iter % args.video_every == 0
-        ),
-        steps_per_iteration=training_config()["num_steps_per_env"],
-        wait_for_episode_start=True,
-        out_dir=str(args.log_dir / "videos"),
+    # Load training configuration and save snapshot of training configs
+    cfg = training_cfg()
+    with open(os.path.join(log_path, "cfgs.pkl"), "wb") as f:
+        pickle.dump([cfg], f)
+
+    # Create environment
+    env = PuckEnv(num_envs=args.num_envs, headless=True)
+
+    # Record videos in regular intervals
+    env = VideoWrapper(
+        env,
+        video_length_sec=12,
+        out_dir=os.path.join(log_path, "videos"),
+        iteration_trigger=lambda i: i % 25 == 0,
+        steps_per_iteration=cfg["num_steps_per_env"],
     )
-    env = RslRlWrapper(video_env)
-    try:
-        env.build()
-        env.reset()
-        from rsl_rl.runners import OnPolicyRunner
-        runner = OnPolicyRunner(
-            env,
-            copy.deepcopy(training_config(args.seed)),
-            str(args.log_dir),
-            device=gs.device,
-        )
-        if args.resume is not None:
-            runner.load(str(args.resume))
-            runner.current_learning_iteration += 1
-            video_env.iteration_offset = runner.current_learning_iteration
-            print(f"Resuming training from {args.resume}")
-        runner.learn(
-            num_learning_iterations=args.iterations,
-            init_at_random_ep_len=False,
-        )
-        print(f"Training checkpoints and logs saved in {args.log_dir}")
-    finally:
-        env.close()
+
+    # Build the environment
+    env = RslRlWrapper(env)
+    env.build()
+    env.reset()
+
+    # Train
+    print("💪 Training model...")
+    runner = OnPolicyRunner(env, copy.deepcopy(cfg), log_path, device=gs.device)
+    runner.add_git_repo_to_log(".")
+    runner.learn(
+        num_learning_iterations=args.max_iterations, init_at_random_ep_len=False
+    )
+    env.close()
 
 
 if __name__ == "__main__":
