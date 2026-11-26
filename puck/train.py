@@ -26,7 +26,7 @@ def training_cfg(seed: int = 0) -> dict:
             "obs_normalization": True,
             "distribution_cfg": {
                 "class_name": "GaussianDistribution",
-                "init_std": 1.0,
+                "init_std": 0.6, # 0.3 = more stable, 1.0 = very aggressive at trying new values
             },
         },
         "critic": {
