@@ -64,13 +64,14 @@ class PuckEnv(ManagedEnvironment):
                 max_collision_pairs=30,
             ),
         )
+        bdr = 0.1 if num_envs == 1 else 1.0 #sharp sim changes are good torture tests for sim driving
         self.terrain_layout = terrain.TerrainLayout(
             self.scene,
             subterrain_size=(24, 24),
             horizontal_scale=0.1,
             grid=[
-                [ terrain.Flat(), terrain.Wave(num_waves=10, border_width=1.0, amplitude=0.1) ], #flat, wavy
-                [ terrain.Wave(num_waves=100, amplitude=0.02, border_width=1.0), terrain.Wave(num_waves=2, amplitude=0.3, border_width=1.0) ], # rough, big wide gradient waves
+                [ terrain.Flat(), terrain.Wave(num_waves=10, border_width=bdr, amplitude=0.1) ], #flat, wavy
+                [ terrain.Wave(num_waves=100, amplitude=0.02, border_width=bdr), terrain.Wave(num_waves=2, amplitude=0.3, border_width=bdr) ], # rough, big wide gradient waves
             ],
         )
         self.robot = self.scene.add_entity(
