@@ -8,6 +8,7 @@ from genesis.utils import geom as gs_util_geom
 CONTROL_DT = 1 / 50
 INITIAL_BODY_POSITION = (0.0, 0.0, 0.231) #initial robot height in standing pose
 HEIGHT_RANGE = (0.02, 0.32) # (m)
+MAX_YAW_RATE = 3.0 # (rad/s)
 PITCH_RANGE = (math.radians(-30), math.radians(30))
 ROLL_RANGE = (math.radians(-50), math.radians(50))
 STANDING_JOINT_POSITIONS = {
@@ -145,7 +146,7 @@ class PuckEnv(ManagedEnvironment):
             range={
                 "lin_vel_x": (-2.0, 2.0),
                 "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-1.5, 1.5),
+                "ang_vel_z": (-MAX_YAW_RATE, MAX_YAW_RATE),
             },
             stopped_probability=0.2,
             resample_time_sec=5.0,
@@ -202,21 +203,21 @@ class PuckEnv(ManagedEnvironment):
             logging_enabled=True,
             cfg={
                 "command_linear_velocity": {
-                    "weight": 1.0,
+                    "weight": 2.0,
                     "fn": gf_mdp.rewards.command_tracking_lin_vel(
                         vel_cmd_manager=self.velocity_command,
                         entity_manager=self.robot_manager,
                     ),
                 },
                 "command_angular_velocity": {
-                    "weight": 0.5,
+                    "weight": 1.0,
                     "fn": gf_mdp.rewards.command_tracking_ang_vel(
                         vel_cmd_manager=self.velocity_command,
                         entity_manager=self.robot_manager,
                     ),
                 },
                 "command_height": {
-                    "weight": 2.0,
+                    "weight": 1.6,
                     "fn": gf_mdp.rewards.base_height_exp(
                         height_command=self.height_command,
                         entity_manager=self.robot_manager,
@@ -241,7 +242,7 @@ class PuckEnv(ManagedEnvironment):
                 },
                 # Hold still, instead of creeping, when commanded to stop
                 "stopped_wheel_velocity": {
-                    "weight": -0.005,
+                    "weight": -0.1,
                     "fn": gf_mdp.rewards.dof_velocity_l2(
                         actuator_manager=self.wheel_actuators,
                     ),
