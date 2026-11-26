@@ -277,11 +277,6 @@ class PuckEnv(ManagedEnvironment):
                         action_manager=self.leg_actions
                     ),
                 },
-                # Penalize episodes that ended in termination
-                "terminated": {
-                    "weight": -10.0,
-                    "fn": gf_mdp.rewards.terminated(),
-                },
             },
         )
 
