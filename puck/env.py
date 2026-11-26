@@ -8,9 +8,8 @@ from genesis.utils import geom as gs_util_geom
 CONTROL_DT = 1 / 50
 INITIAL_BODY_POSITION = (0.0, 0.0, 0.231) #initial robot height in standing pose
 HEIGHT_RANGE = (0.02, 0.32) # (m)
-D2R : typing.Final[float] = math.pi / 180
-PITCH_RANGE = (-30 * D2R, 30 * D2R)
-ROLL_RANGE = (-50 * D2R, 50 * D2R)
+PITCH_RANGE = (math.radians(-30), math.radians(30))
+ROLL_RANGE = (math.radians(-50), math.radians(50))
 STANDING_JOINT_POSITIONS = {
     "flexor_r": 0.0,
     "hip_r": math.pi / 4,
@@ -19,6 +18,20 @@ STANDING_JOINT_POSITIONS = {
     "knee_l": -math.pi / 2,
     "flexor_l": 0.0,
 }
+
+class RestProbabilityCmd(gf_mgrs.CommandManager):
+    def __init__(self, env, rest_probability: float = 0.0, rest: float = 0.0, **kw):
+        super().__init__(env, **kw)
+        self.rest_probability = rest_probability
+        self.rest = rest
+    @typing.override
+    def resample_command(self, env_ids):
+        if self._gamepad_cfg: return
+        super().resample_command(env_ids)
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=gs.device)
+        rest = torch.rand(len(env_ids), device=gs.device) < self.rest_probability
+        self._command[env_ids[rest]] = self.rest
+
 
 class PuckEnv(ManagedEnvironment):
     def __init__(
@@ -145,9 +158,10 @@ class PuckEnv(ManagedEnvironment):
             range=HEIGHT_RANGE,
             resample_time_sec=4.0,
         )
-        self.attitude_command = gf_mgrs.CommandManager(
-            self, range={"pitch": PITCH_RANGE, "roll": ROLL_RANGE},
-            resample_time_sec=3.0,
+        self.attitude_command = RestProbabilityCmd(
+            self, rest_probability=0.2,
+            range={"pitch": PITCH_RANGE, "roll": ROLL_RANGE},
+            resample_time_sec=3.5,
         )
 
         def square_linear_error(error: torch.Tensor, scale: float) -> torch.Tensor:
