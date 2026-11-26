@@ -159,34 +159,36 @@ class PuckEnv(ManagedEnvironment):
             range=HEIGHT_RANGE,
             resample_time_sec=4.0,
         )
-        self.attitude_command = RestProbabilityCmd(
-            self, rest_probability=0.2,
-            range={"pitch": PITCH_RANGE, "roll": ROLL_RANGE},
-            resample_time_sec=3.5,
-        )
+        self.pitch_command = RestProbabilityCmd(self, rest_probability=0.2, range=PITCH_RANGE, resample_time_sec=3.5)
+        self.roll_command  = RestProbabilityCmd(self, rest_probability=0.2, range=ROLL_RANGE,  resample_time_sec=3.5)
 
         def square_linear_error(error: torch.Tensor, scale: float) -> torch.Tensor:
             '''exponential reward with additial linear penalty to provide gradient pressure for large errors'''
             return torch.exp(-(error / scale).square()) - 0.1 * (error.abs() / scale)
 
-        def effective_attitude(name: str) -> torch.Tensor:
+        def mid_height_scale() -> torch.Tensor:
             height = self.height_command.command[:, 0]
             lo, hi = HEIGHT_RANGE
             h_n = INITIAL_BODY_POSITION[2]
-            scale = torch.where(
-                height < h_n,
-                (height - lo) / (h_n - lo),
-                (hi - height) / (hi - h_n),
-            ).clamp(0.0, 1.0)
-            return self.attitude_command.get_command(name).reshape(-1) * scale
+            lo_scale = (height - lo) / (h_n - lo)
+            hi_scale = (hi - height) / (hi - h_n)
+            return torch.minimum(lo_scale, hi_scale).clamp(0.0, 1.0)
+
+        def get_pitch_target(env = None): return self.pitch_command.command.reshape(-1) * mid_height_scale() #scale on height only
+        def get_roll_target(env = None):
+            '''scale down the roll command based on forward velocity, yaw velocity, and height'''
+            forward_velocity = self.velocity_command.get_command("lin_vel_x").reshape(-1)
+            yaw_velocity = self.velocity_command.get_command("ang_vel_z").reshape(-1)
+            roll_scale = (1.0 - (forward_velocity + yaw_velocity) / 2.0).clamp(0.0, 1.0)
+            return self.roll_command.command.reshape(-1) * mid_height_scale() * roll_scale
 
         def pitch_tracking(env) -> torch.Tensor:
             actual = gs_util_geom.quat_to_xyz(self.robot_manager.base_quat, rpy=True)[:, 1] #y rotation
-            target = effective_attitude('pitch')
+            target = get_pitch_target()
             return square_linear_error(actual - target, 0.2)
         def roll_tracking(env) -> torch.Tensor:
             actual = gs_util_geom.quat_to_xyz(self.robot_manager.base_quat, rpy=True)[:, 0] #x rotation
-            target = effective_attitude('roll')
+            target = get_roll_target()
             return square_linear_error(actual - target, 0.2)
 
         def hip_flexor_alignment(env) -> torch.Tensor:
@@ -325,7 +327,7 @@ class PuckEnv(ManagedEnvironment):
                     "scale": 0.25,
                     "clip": (-100.0, 100.0),
                 },
-                "attitude_cmd": {"fn": lambda env: torch.stack([effective_attitude("pitch"), effective_attitude("roll")], dim=-1)},
+                "attitude_cmd": {"fn": lambda env: torch.stack([get_pitch_target(), get_roll_target()], dim=-1)},
                 "projected_gravity": {
                     "fn": lambda env: self.robot_manager.get_projected_gravity(),
                 },
