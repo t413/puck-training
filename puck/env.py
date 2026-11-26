@@ -195,8 +195,22 @@ class PuckEnv(ManagedEnvironment):
             max_flexor_angle = joint_positions[:, flexor_indices].abs().amax(dim=1)
             tolerance = math.pi / 15 #12deg
             excess = torch.relu(max_flexor_angle - tolerance)
-            # return torch.exp(-4.0 * (excess / tolerance).square())
             return square_linear_error(-4.0 * excess, tolerance)
+        def hip_knee_symmetry(env) -> torch.Tensor:
+            '''Punish asymmetry between mirrored hip & knee joints.'''
+            positions = self.leg_actuators.get_dofs_position()
+            dof_indices = { name: index for index, name in enumerate(self.leg_actuators.dofs_names) }
+            mirrored_joints = (
+                ("hip_l", "hip_r", -1.0),
+                ("knee_l", "knee_r", -1.0),
+            )
+            errors = torch.stack(
+                [ positions[:, dof_indices[left]] - sign * positions[:, dof_indices[right]] for left, right, sign in mirrored_joints ],
+                dim=1,
+            )
+            symmetry_reward = torch.exp(-errors.square().mean(dim=1))
+            near_zero_roll = self.roll_command.command.reshape(-1).abs() < math.radians(5)
+            return symmetry_reward * near_zero_roll.to(symmetry_reward.dtype)
 
         self.reward_mgr = gf_mgrs.RewardManager(
             self,
@@ -227,7 +241,8 @@ class PuckEnv(ManagedEnvironment):
                 },
                 "command_pitch": { "weight": 1.0, "fn": pitch_tracking },
                 "command_roll":  { "weight": 1.0, "fn": roll_tracking },
-                "hip_flexor_alignment": { "weight": 0.5, "fn": hip_flexor_alignment },
+                "hip_flexor_alignment": { "weight": -0.1, "fn": hip_flexor_alignment },
+                "leg_symmetry":         { "weight": -0.1, "fn": hip_knee_symmetry },
                 # Don't bounce up and down. Kept light, so it doesn't slow the
                 # robot down when moving to a new commanded height.
                 "lin_vel_z": {
@@ -288,13 +303,6 @@ class PuckEnv(ManagedEnvironment):
                     "fn": gf_mdp.terminations.contact_force(
                         contact_manager=self.ground_contact,
                         threshold=1.0,
-                    ),
-                },
-                "collapsed": {
-                    "fn": gf_mdp.terminations.base_height_below_minimum(
-                        # Well below the lowest commanded height
-                        minimum_height=0.07,
-                        entity_manager=self.robot_manager,
                     ),
                 },
                 "out_of_bounds": {
